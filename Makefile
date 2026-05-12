@@ -27,7 +27,24 @@ MCP_DEV_PORT         ?= 8091
 INSPECTOR_PORT       ?= 6474
 INSPECTOR_PROXY_PORT ?= 6477
 
-.PHONY: build check fmt lint test vet devserver-build devserver-run
+# `make port-forward` tunnels the in-cluster qBittorrent pod's loopback
+# WebUI to host port $(KUBECTL_QBIT_LOCAL_PORT). qBit binds 127.0.0.1
+# inside the pod's netns; kubelet enters the netns and bridges TCP, so a
+# Service is not required (and would not work — there isn't one). Run in
+# a dedicated terminal; `make devserver-run` in another terminal then
+# reaches qBit via host.docker.internal:$(KUBECTL_QBIT_LOCAL_PORT).
+KUBECTL_NS                ?= media
+KUBECTL_QBIT_SELECTOR     ?= deployment/media-qbit-depl-c81776b5
+KUBECTL_QBIT_LOCAL_PORT   ?= 8082
+KUBECTL_QBIT_REMOTE_PORT  ?= 8080
+
+# devserver-run defaults QBITTORRENT_URL to the forwarded port so a fresh
+# `make port-forward` + `make devserver-run` works without extra env
+# plumbing. Override via QBITTORRENT_URL=... when targeting a different
+# qBit (e.g. a local test container).
+QBITTORRENT_URL ?= http://host.docker.internal:$(KUBECTL_QBIT_LOCAL_PORT)
+
+.PHONY: build check fmt lint test vet devserver-build devserver-run port-forward
 
 build:
 	go build -trimpath -ldflags='$(GO_LDFLAGS)' -o bin/qbit-mcp ./cmd/qbit-mcp
@@ -66,7 +83,17 @@ devserver-run:
 		-p 127.0.0.1:$(INSPECTOR_PORT):6474 \
 		-p 127.0.0.1:$(INSPECTOR_PROXY_PORT):6477 \
 		-v "$(CURDIR):/src" \
-		$(if $(QBITTORRENT_URL),-e QBITTORRENT_URL="$(QBITTORRENT_URL)") \
+		-e QBITTORRENT_URL="$(QBITTORRENT_URL)" \
+		$(if $(QBITTORRENT_SAVE_PATHS),-e QBITTORRENT_SAVE_PATHS="$(QBITTORRENT_SAVE_PATHS)") \
 		$(if $(QBITTORRENT_LOG_LEVEL),-e QBITTORRENT_LOG_LEVEL="$(QBITTORRENT_LOG_LEVEL)") \
 		$(if $(MCP_PROXY_AUTH_TOKEN),-e MCP_PROXY_AUTH_TOKEN="$(MCP_PROXY_AUTH_TOKEN)") \
 		$(DEVSERVER_IMAGE)
+
+# Foreground tunnel into the qBittorrent pod's pod-loopback WebUI.
+# Pod name changes on restart, so the selector targets the Deployment
+# (kubectl resolves to a current pod automatically). Override
+# KUBECTL_NS / KUBECTL_QBIT_SELECTOR for a different cluster shape.
+port-forward:
+	@echo "Forwarding $(KUBECTL_NS)/$(KUBECTL_QBIT_SELECTOR) :$(KUBECTL_QBIT_REMOTE_PORT) -> localhost:$(KUBECTL_QBIT_LOCAL_PORT)"
+	@echo "Ctrl-C to stop. Re-run if the qbit pod restarts."
+	kubectl port-forward -n $(KUBECTL_NS) $(KUBECTL_QBIT_SELECTOR) $(KUBECTL_QBIT_LOCAL_PORT):$(KUBECTL_QBIT_REMOTE_PORT)
