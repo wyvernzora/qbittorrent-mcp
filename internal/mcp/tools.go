@@ -18,9 +18,9 @@ type internalHandler[I, O any] func(ctx context.Context, in I) (O, *ToolError)
 
 // Register adds all qBittorrent tools to the given server. The tool surface
 // is split by domain — see internal/mcp/tools_downloads.go,
-// internal/mcp/tools_tags.go, and internal/mcp/tools_rss.go for the
-// per-domain registrations. docs/tools.md is the design spec for the whole
-// surface.
+// internal/mcp/tools_tags.go, internal/mcp/tools_destinations.go, and
+// internal/mcp/tools_rss.go for the per-domain registrations.
+// docs/tools.md is the design spec for the whole surface.
 //
 // resolver is the deploy-time destination alias map; tool handlers that
 // accept a `destination` input translate the alias name into the upstream
@@ -28,6 +28,7 @@ type internalHandler[I, O any] func(ctx context.Context, in I) (O, *ToolError)
 func Register(s *mcpsdk.Server, client *qbt.Client, resolver *savepath.Resolver, logger *slog.Logger) {
 	registerDownloads(s, client, resolver, logger)
 	registerTags(s, client, resolver, logger)
+	registerDestinations(s, client, resolver, logger)
 	registerRSS(s, client, resolver, logger)
 }
 

@@ -1,6 +1,6 @@
 # Tool surface
 
-Design spec for the MCP tools `qbit-mcp` exposes. Ten tools across three groups: downloads (3), tags (1), RSS (6).
+Design spec for the MCP tools `qbit-mcp` exposes. Eleven tools across four groups: downloads (3), tags (1), destinations (1), RSS (6).
 
 Design priorities:
 
@@ -31,9 +31,9 @@ Tool descriptions include the current alias list at session start, so agents see
 Valid destinations: downloads, kura-inbox. Leave empty to use qBittorrent's account default.
 ```
 
-Output projections still report qBittorrent's raw `save_path` — that is what qbit actually stores. Agents read truth on the way out, pick aliases on the way in.
+Output projections still report qBittorrent's raw `save_path` — that is what qbit actually stores. Agents read truth on the way out, pick aliases on the way in. The `list_destinations` tool exposes the configured map so an agent that observed a raw `save_path` on a Download output can reverse-look the alias name without restarting.
 
-Unknown destination names return `invalid_argument`. Reverse-lookup (raw `save_path` → alias name) is not exposed in v1.
+Unknown destination names return `invalid_argument`.
 
 ### Audit logging
 
@@ -265,6 +265,29 @@ Tags auto-create when `add_download.tags` references an unknown tag. No `create_
 
 ---
 
+## Destination tools
+
+### `list_destinations`
+
+Read the deploy-time-configured save-path aliases. No upstream call — the map is fixed for the lifetime of the qbit-mcp process. Restart with a different `--save-paths` / `QBITTORRENT_SAVE_PATHS` to change it.
+
+**Output:**
+
+```json
+{
+  "destinations": [
+    { "name": "kura-inbox", "path": "/mnt/kura" },
+    { "name": "downloads",  "path": "/mnt/downloads" }
+  ]
+}
+```
+
+`name` is the value to pass on `add_download.destination` / `set_rss_rule.destination`. `path` is the resolved absolute filesystem path qBittorrent will see — useful for reverse-lookups from a raw `save_path` observed on a Download output.
+
+Returns an empty array when no aliases are configured. Names are sorted alphabetically.
+
+---
+
 ## RSS tools
 
 qBittorrent's RSS endpoints (`/api/v2/rss/*`) are not implemented by `github.com/autobrr/go-qbittorrent` as of v1.15.0. qbit-mcp reaches them via `client.GetHTTPClient()` and the configured `--qb-url`. The wrapper lives under `internal/qbtrss/` and is the only place in qbit-mcp that talks to qBittorrent without going through the SDK. Tracking issue: TODO file upstream.
@@ -388,7 +411,7 @@ These all map cleanly onto the established `internalHandler` + `wrap` pattern; a
 
 | Component | Approx tokens |
 |---|---|
-| Tool list (10 names + descriptions) loaded per turn | 0.8k – 1.0k |
+| Tool list (11 names + descriptions) loaded per turn | 0.9k – 1.1k |
 | `list_downloads` default response, 50 downloads | 3.5k – 4.5k |
 | `list_downloads` default response, 10 downloads | 0.7k – 1.0k |
 | `list_downloads` single-hash with `include_fields=["all"]` (no trackers/files) | 0.3k |

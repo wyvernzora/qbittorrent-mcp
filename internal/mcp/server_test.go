@@ -49,7 +49,7 @@ func startTestSession(t *testing.T) (*mcpsdk.ClientSession, func()) { //nolint:g
 	return cs, cleanup
 }
 
-func TestListTools_All10Registered(t *testing.T) {
+func TestListTools_All11Registered(t *testing.T) {
 	cs, cleanup := startTestSession(t)
 	defer cleanup()
 	res, err := cs.ListTools(context.Background(), nil)
@@ -63,6 +63,8 @@ func TestListTools_All10Registered(t *testing.T) {
 		"remove_downloads": false,
 		// tags (1)
 		"list_tags": false,
+		// destinations (1)
+		"list_destinations": false,
 		// rss (6)
 		"list_rss":        false,
 		"add_rss_feed":    false,
