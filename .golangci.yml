@@ -1,0 +1,78 @@
+# golangci-lint config.
+# Run via: make lint  →  golangci-lint run ./...
+#
+# Linter selection per project policy:
+#   - govet         standard go vet checks; baseline correctness.
+#   - gocritic      opinionated diagnostic + performance + style checks.
+#   - cyclop        cyclomatic complexity ceiling per function.
+#   - decorder      enforces declaration ordering inside files.
+#   - contextcheck  catches functions that should accept ctx but don't.
+#   - staticcheck   honnef.co static analysis suite (rolls in stylecheck,
+#                   simple, unused).
+version: "2"
+run:
+  modules-download-mode: readonly
+  tests: true
+linters:
+  default: none
+  enable:
+    - contextcheck
+    - cyclop
+    - decorder
+    - gocritic
+    - govet
+    - staticcheck
+  settings:
+    cyclop:
+      max-complexity: 15
+      package-average: 0
+    decorder:
+      disable-dec-num-check: true
+      disable-dec-order-check: true
+      disable-init-func-first-check: true
+    gocritic:
+      disabled-checks:
+        - paramTypeCombine
+        - commentedOutCode
+        - hugeParam
+        - rangeValCopy
+        - builtinShadow
+        - regexpSimplify
+        # importShadow flags every variable named after an imported
+        # package. v2 enabled it by default; disabling matches prior baseline.
+        - importShadow
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+    staticcheck:
+      # Scope to the SA family (safety analysis) only. v2 expanded `all`
+      # to include ST* (stylecheck), QF* (quickfix), and S1* (simple);
+      # those were not enforced before. Re-enable in a follow-up if desired.
+      checks:
+        - SA*
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - cyclop
+        path: (.+)_test\.go
+      - linters:
+          - gocritic
+          - govet
+          - staticcheck
+        path: vendor/
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
