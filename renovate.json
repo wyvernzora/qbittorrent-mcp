@@ -1,0 +1,59 @@
+{
+	"$schema": "https://docs.renovatebot.com/renovate-schema.json",
+	"extends": [
+		"config:recommended",
+		"helpers:pinGitHubActionDigests",
+		":dependencyDashboard",
+		":semanticCommits",
+		":separateMajorReleases"
+	],
+	"timezone": "America/Los_Angeles",
+	"schedule": ["after 6pm every weekday", "every weekend"],
+	"prConcurrentLimit": 10,
+	"prHourlyLimit": 4,
+	"lockFileMaintenance": {
+		"enabled": true,
+		"schedule": ["before 6am on monday"]
+	},
+	"vulnerabilityAlerts": {
+		"labels": ["security"],
+		"automerge": true
+	},
+	"packageRules": [
+		{
+			"description": "Auto-merge GitHub action digest refreshes (pinned-sha hygiene)",
+			"matchManagers": ["github-actions"],
+			"matchUpdateTypes": ["digest", "pin"],
+			"automerge": true
+		},
+		{
+			"description": "Auto-merge patch bumps everywhere (CI gates)",
+			"matchUpdateTypes": ["patch"],
+			"automerge": true
+		},
+		{
+			"description": "Group golang.org/x/* family - they version-lockstep",
+			"matchPackagePatterns": ["^golang\\.org/x/"],
+			"groupName": "golang.org/x"
+		},
+		{
+			"description": "Group docker/* GitHub actions",
+			"matchPackagePatterns": ["^docker/"],
+			"matchManagers": ["github-actions"],
+			"groupName": "docker github actions"
+		},
+		{
+			"description": "Group actions/{checkout,setup-*}",
+			"matchPackageNames": [
+				"actions/checkout",
+				"actions/setup-go"
+			],
+			"groupName": "actions/setup"
+		},
+		{
+			"description": "Major bumps surface for human triage",
+			"matchUpdateTypes": ["major"],
+			"labels": ["major-bump", "needs-review"]
+		}
+	]
+}
