@@ -121,11 +121,13 @@ func TestSearchSubscriptions_ManagedRuleProjected(t *testing.T) {
 	if s.FeedURL != testFeedURL {
 		t.Errorf("feed_url = %q", s.FeedURL)
 	}
-	if s.SavePath != "/mnt/kura" {
-		t.Errorf("save_path = %q", s.SavePath)
-	}
-	if s.Destination != "kura-inbox" {
-		t.Errorf("destination = %q, want reverse-resolved 'kura-inbox'", s.Destination)
+	// SavePath is the prefixed form ("kura-inbox" for an exact root
+	// match; "kura-inbox:relpath" when the rule's save_path nests
+	// below the alias root — qbit-mcp never produces the nested form
+	// itself, but operator-edits via the WebUI can). Agents that
+	// need just the alias name split on ":" and take the prefix.
+	if s.SavePath != "kura-inbox" {
+		t.Errorf("save_path = %q, want 'kura-inbox' (alias-prefixed form)", s.SavePath)
 	}
 	if len(s.Tags) != 1 || s.Tags[0] != "tvdb:12345" {
 		t.Errorf("tags = %v", s.Tags)

@@ -38,7 +38,7 @@ func registerDownloads(s *mcpsdk.Server, client *qbt.Client, resolver *savepath.
 			Description: "Search downloads with filtering, sorting, and pagination. Default projection is lean (hash, name, state, progress, sizes, speeds, eta, ratio, tags, added_on). Use include_fields to opt into richer fields including save_path, magnet_uri, peer/seed counts, flags, ratio_limit, seeding_time. The special value include_fields=[\"all\"] enables every opt-in field except trackers/files. The trackers and files keys require single-hash selection (exactly one hash in hashes, no states/tags filter) to avoid N+1 fan-out. Default limit 50, max 200; paginate via offset.",
 			Annotations: readOnlyAnnotations(),
 		},
-		wrap("qbit_search_downloads", logger, searchDownloadsHandler(client)),
+		wrap("qbit_search_downloads", logger, searchDownloadsHandler(client, resolver)),
 	)
 	mcpsdk.AddTool(s,
 		&mcpsdk.Tool{
@@ -159,7 +159,7 @@ type searchDownloadsRequest struct {
 	offset     int
 }
 
-func searchDownloadsHandler(client *qbt.Client) internalHandler[SearchDownloadsInput, SearchDownloadsOutput] {
+func searchDownloadsHandler(client *qbt.Client, resolver *savepath.Resolver) internalHandler[SearchDownloadsInput, SearchDownloadsOutput] {
 	return func(ctx context.Context, in SearchDownloadsInput) (SearchDownloadsOutput, *ToolError) {
 		empty := SearchDownloadsOutput{Downloads: []Download{}}
 
@@ -185,7 +185,7 @@ func searchDownloadsHandler(client *qbt.Client) internalHandler[SearchDownloadsI
 			Downloads: make([]Download, 0, len(page)),
 		}
 		for _, t := range page {
-			d := projectDownload(t, req.includeSet)
+			d := projectDownload(t, req.includeSet, resolver)
 			if req.includeSet["trackers"] {
 				if terr := fetchTrackers(ctx, client, t.Hash, &d); terr != nil {
 					return empty, terr
@@ -441,7 +441,14 @@ func normalizeETA(eta int64) int64 {
 // projectDownload maps an autobrr qbt.Torrent into the lean MCP wire shape,
 // filling opt-in fields per the include set. Trackers and Files are NOT
 // populated here — the handler fetches them per-hash when requested.
-func projectDownload(t qbt.Torrent, include map[string]bool) Download {
+//
+// Path-shaped fields (save_path, content_path, download_path) are
+// post-processed through resolver.NameForPathPrefixed when they're
+// part of the include set: an absolute path that lives under a
+// configured alias root is rewritten to the "<alias>:<relpath>" form
+// (or just "<alias>" when the path equals the root exactly). Paths
+// outside every configured alias are echoed raw.
+func projectDownload(t qbt.Torrent, include map[string]bool, resolver *savepath.Resolver) Download {
 	out := Download{
 		Hash:               t.Hash,
 		Name:               t.Name,
@@ -460,7 +467,28 @@ func projectDownload(t qbt.Torrent, include map[string]bool) Download {
 			setter(&out, t)
 		}
 	}
+	if include["save_path"] {
+		out.SavePath = prefixed(resolver, out.SavePath)
+	}
+	if include["content_path"] {
+		out.ContentPath = prefixed(resolver, out.ContentPath)
+	}
+	if include["download_path"] {
+		out.DownloadPath = prefixed(resolver, out.DownloadPath)
+	}
 	return out
+}
+
+// prefixed rewrites a qBittorrent absolute path into the wire form
+// used by every tool output projection (see
+// savepath.Resolver.NameForPathPrefixed). Empty input stays empty;
+// every non-empty input becomes either "<alias>", "<alias>:<relpath>",
+// or "unspecified:<rest>".
+func prefixed(resolver *savepath.Resolver, path string) string {
+	if path == "" {
+		return ""
+	}
+	return resolver.NameForPathPrefixed(path)
 }
 
 // trackerStatusString converts autobrr's integer TrackerStatus enum into a
@@ -536,7 +564,7 @@ func fetchFiles(ctx context.Context, client *qbt.Client, hash string, d *Downloa
 type AddDownloadInput struct {
 	Magnet      string   `json:"magnet" jsonschema:"magnet URI with xt=urn:btih:<hash> parameter. URLs and torrent-file uploads are not supported in v1."`
 	Tags        []string `json:"tags,omitempty" jsonschema:"tags to apply on add; unknown tags are auto-created. tag names must not contain commas (qBittorrent stores tag lists CSV-encoded)."`
-	Destination string   `json:"destination,omitempty" jsonschema:"deploy-time-configured save-destination alias name. See the tool description for the valid set. Empty inherits qBittorrent's account default."`
+	Destination string   `json:"destination,omitempty" jsonschema:"save-destination alias. Accepts '<alias>' for the alias root or '<alias>:<relpath>' to target a subdirectory under the root (relpath must not start with '/' or contain '..'). Reserved name 'unspecified' rejected — output-only sentinel. Empty inherits qBittorrent's account default."`
 	Rename      string   `json:"rename,omitempty" jsonschema:"rename download inside qBittorrent on add (display name override)"`
 }
 

@@ -54,9 +54,38 @@ Tool descriptions include the current alias list at session start, so agents see
 Valid destinations: downloads, kura-inbox. Leave empty to use qBittorrent's account default.
 ```
 
-Output projections still report qBittorrent's raw `save_path` — that is what qbit actually stores. Agents read truth on the way out, pick aliases on the way in. The `qbit_list_destinations` tool exposes the configured map so an agent that observed a raw `save_path` on a Download output can reverse-look the alias name without restarting.
+**Every** path on input and on regular output projections uses the form `"<prefix>:<rest>"` (or the bare `"<prefix>"` form when there is no rest). No raw absolute paths cross the wire on those surfaces.
 
-Unknown destination names return `invalid_argument`.
+The one carve-out is `qbit_list_destinations`, which intentionally exposes the alias→absolute-path map so operators can verify the deploy-time configuration and so agents can translate an `unspecified:…` projection back to a real filesystem location. It is the only tool that surfaces raw absolute paths.
+
+**Output projections** (`save_path`, `content_path` on `qbit_search_downloads`; `save_path` on `qbit_search_subscriptions`):
+
+| qBittorrent stored path | Output |
+| --- | --- |
+| Path **equals** an alias root, e.g. `/mnt/kura` with `kura-inbox=/mnt/kura` | `"kura-inbox"` |
+| Path **nested** below an alias root, e.g. `/mnt/kura/anime/show` | `"kura-inbox:anime/show"` |
+| Path **not** under any alias, e.g. `/data/random` | `"unspecified:data/random"` |
+
+The `unspecified:` prefix is a reserved sentinel for paths that no configured alias covers. The leading `/` on the absolute path is stripped after the colon for format symmetry with the alias-relative form. Agents that need to surface the underlying filesystem path to a user can prepend a `/` to the part after `unspecified:`.
+
+Boundary-safe: `/mnt/kura-other/foo` does **not** match an alias rooted at `/mnt/kura` — only `/mnt/kura` or `/mnt/kura/…` do. Falls through to `unspecified:mnt/kura-other/foo`. Longest-prefix wins when two aliases nest (e.g. `outer=/x` and `inner=/x/y` → `/x/y/z` resolves as `inner:z`).
+
+**Input fields** (`destination` on `qbit_add_download` and `qbit_subscribe`):
+
+| Input | Meaning |
+| --- | --- |
+| `"kura-inbox"` | alias root (resolves to the configured filesystem path) |
+| `"kura-inbox:season-1"` | alias root joined with the relpath → `/mnt/kura/season-1` |
+| `"unspecified:…"` | **rejected** with `invalid_argument` — output-only sentinel |
+| Unknown alias name | **rejected** with `invalid_argument` (configured set listed in the error message) |
+
+Relpath validation: absolute relpaths (`kura-inbox:/etc/passwd`) are rejected; relpaths containing `..` components that would escape the alias root (`kura-inbox:foo/../../etc`) are rejected. Internal redundancy is silently normalized (`kura-inbox:./foo/./bar/` → `/mnt/kura/foo/bar`).
+
+**Roundtrip works** for aliased paths: an agent that observed `save_path: "kura-inbox:anime/show"` can pass the same value back as `qbit_subscribe.destination` to point a new subscription at the same directory. Paths surfaced as `unspecified:…` cannot be roundtripped — they were placed by an operator outside the alias map and the agent has no authority to create new downloads there.
+
+**Reserved alias name**: `unspecified` is rejected at boot if an operator tries to configure it via `--save-paths`; it exists solely as the no-alias output sentinel.
+
+The `qbit_list_destinations` tool exposes the alias-to-root map so an agent can confirm which prefixes are valid on input.
 
 ### Audit logging
 
@@ -184,7 +213,7 @@ Primary read. Filtered, sorted, paginated.
 
 `include_fields` opt-in values:
 
-- **Field-level:** `save_path`, `content_path`, `download_path`, `magnet_uri`, `completion_on`, `last_activity`, `total_uploaded`, `total_downloaded`, `total_size`, `seeds`, `seeds_incomplete`, `peers`, `tracker_count`, `auto_tmm`, `sequential`, `force_start`, `super_seeding`, `first_last_piece_prio`, `ratio_limit`, `seeding_time`, `seeding_time_limit`, `private`.
+- **Field-level:** `save_path`, `content_path`, `download_path`, `magnet_uri`, `completion_on`, `last_activity`, `total_uploaded`, `total_downloaded`, `total_size`, `seeds`, `seeds_incomplete`, `peers`, `tracker_count`, `auto_tmm`, `sequential`, `force_start`, `super_seeding`, `first_last_piece_prio`, `ratio_limit`, `seeding_time`, `seeding_time_limit`, `private`. The three path-shaped fields (`save_path`, `content_path`, `download_path`) are rewritten to the `<alias>:<relpath>` form when they live under a configured destination — see Destinations above.
 - **Per-hash enrichments:** `trackers`, `files`. These trigger one additional upstream call per result, so they **require single-hash selection** — exactly one entry in `hashes`, no `states` filter, no `tags` filter. Anything else returns `invalid_argument` to prevent N+1 fan-out.
 - **Convenience:** `"all"` expands to every field-level key (but not trackers/files). Use `["all", "trackers", "files"]` to get the kitchen-sink projection on a single hash.
 
@@ -325,7 +354,10 @@ Read the deploy-time-configured save-path aliases. No upstream call — the map 
 }
 ```
 
-`name` is the value to pass on `qbit_add_download.destination` / `qbit_subscribe.destination`. `path` is the resolved absolute filesystem path qBittorrent will see — useful for reverse-lookups from a raw `save_path` observed on a Download output.
+`name` is the value to pass on `qbit_add_download.destination` / `qbit_subscribe.destination`. `path` is the resolved absolute filesystem path qBittorrent stores under that alias — the one place on the surface where a raw absolute path is intentionally exposed. Two use cases:
+
+1. **Confirm which alias names are valid** before invoking a destination-using tool. Same content as the description-time `destHint`, but queryable on demand if it's stale.
+2. **Translate an `unspecified:<rest>` projection back to a real location.** If a Download was added outside the alias map (operator action, legacy download), its `save_path` surfaces as `unspecified:data/some/path`. `qbit_list_destinations` lets the agent compare that against the configured roots and decide whether to leave it alone, rename, or surface to the user with the real `/data/some/path` for context.
 
 Returns an empty array when no aliases are configured. Names are sorted alphabetically.
 
@@ -406,10 +438,9 @@ Search subscriptions with optional filtering and pagination. Each row carries en
       "must_contain": "1080p",
       "must_not_contain": "VOSTFR",
       "use_regex": false,
-      "episode_filter": "1x2;",
+      "episode_filter": "1x4-;",
       "smart_filter": false,
-      "destination": "kura-inbox",
-      "save_path": "/mnt/kura",
+      "save_path": "kura-inbox",
       "tags": ["tvdb:12345", "weekly"],
       "ignore_days": 0,
       "add_paused": false,
@@ -427,7 +458,7 @@ Search subscriptions with optional filtering and pagination. Each row carries en
 }
 ```
 
-`save_path` is qBittorrent's raw path (truth on the way out). `destination` is the reverse-resolved alias name when one matches; empty when the raw `save_path` does not correspond to a configured alias. `last_match_date` passes through qBittorrent's native format (typically ISO 8601, version-dependent) — empty when the rule has never matched.
+`save_path` is the **alias-prefixed form** of qBittorrent's stored path (see Destinations above for the exact rules): `"<alias>"` for an exact root match, `"<alias>:<relpath>"` when nested, raw absolute path as fallback. The alias name is encoded in the prefix — agents that need it on its own (e.g. to re-pass as `qbit_subscribe.destination`) split on the first `:` and take the prefix. `last_match_date` passes through qBittorrent's native format (typically ISO 8601, version-dependent) — empty when the rule has never matched.
 
 `feed_has_error` is a plain boolean. qBittorrent's RSS API does not expose a companion error-message string on the `/api/v2/rss/items` response, so the **reason** for a feed error cannot be surfaced through this tool. When `feed_has_error: true`, check the qBittorrent WebUI directly to diagnose (broken URL, upstream DNS, malformed XML, etc.).
 
@@ -448,7 +479,7 @@ Atomic upsert. Creates (or replaces) the feed at the synthetic path and the rule
   "must_contain": "1080p",
   "must_not_contain": "VOSTFR|RAW",
   "use_regex": false,
-  "episode_filter": "1x3;",
+  "episode_filter": "1x4-;",
   "smart_filter": false,
   "destination": "kura-inbox",
   "tags": ["tvdb:12345", "weekly"],
@@ -465,7 +496,14 @@ Filter fields (all pass through to qBittorrent's auto-download rule):
 - `must_contain` — substring (or regex when `use_regex: true`) that the feed-item title must match.
 - `must_not_contain` — substring (or regex) that excludes a feed item. Applied after `must_contain`.
 - `use_regex` — treat both `must_contain` and `must_not_contain` as Perl-style regex.
-- `episode_filter` — qBittorrent's episode-filter syntax. `1x3;` matches season 1, episode 3 onward. `1x3-5;` is a closed range (E3, E4, E5). Multiple expressions semicolon-separated: `1x3-5;2x1-;`. Omit (or empty string) for no episode constraint.
+- `episode_filter` — qBittorrent's episode-filter syntax. The trailing `;` is the expression terminator; the dash inside an expression is what marks ranges. Forms:
+    - `1x3;` — single episode S01E03 only
+    - `1x3-5;` — closed range S01E03–S01E05 (both inclusive)
+    - `1x3-;` — open-ended range S01E03 onward (explicit trailing dash)
+    - `1x;` — every episode of season 1
+    - `1x3-;2x;` — multiple expressions joined with `;`; this one means "S01E03 onward plus all of season 2"
+
+  Omit (or pass empty string) for no episode constraint. Common subscription use: an agent subscribes to a show mid-season after the user watched earlier episodes elsewhere — `episode_filter: "1x4-;"` then auto-downloads only E4 onward.
 - `smart_filter` — qBittorrent's deduplicating filter. When `true`, suppresses re-matches of an episode already added by this rule (handles common cases like a re-encode appearing days later). Off by default.
 - `ignore_days` — cool-down in days between matches against the same feed item. `0` disables.
 - `add_paused` — when `true`, matched downloads start paused. Useful for review-before-download workflows; otherwise leave `false`.

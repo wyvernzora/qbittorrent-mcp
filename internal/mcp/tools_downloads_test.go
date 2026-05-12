@@ -136,7 +136,16 @@ func mustResolver(t *testing.T, spec string) *savepath.Resolver {
 
 func callSearchDownloads(t *testing.T, client *qbt.Client, in SearchDownloadsInput) (SearchDownloadsOutput, *ToolError) {
 	t.Helper()
-	h := searchDownloadsHandler(client)
+	return callSearchDownloadsWithResolver(t, client, mustResolver(t, ""), in)
+}
+
+// callSearchDownloadsWithResolver lets tests that exercise the
+// destination-alias prefix on save_path / content_path / download_path
+// supply a populated resolver. Most tests don't care and use the empty
+// default via callSearchDownloads.
+func callSearchDownloadsWithResolver(t *testing.T, client *qbt.Client, resolver *savepath.Resolver, in SearchDownloadsInput) (SearchDownloadsOutput, *ToolError) {
+	t.Helper()
+	h := searchDownloadsHandler(client, resolver)
 	return h(context.Background(), in)
 }
 
@@ -198,6 +207,80 @@ func TestSearchDownloads_LeanProjectionOmitsOptIn(t *testing.T) {
 	}
 }
 
+func TestSearchDownloads_SavePathPrefixedToAlias(t *testing.T) {
+	// fixture6Downloads has save_path=/data/anime on aaa/bbb and
+	// /data/movies on ccc. With aliases configured for both, the
+	// projection should rewrite save_path as "anime" / "movies"
+	// (exact-root match, no relpath suffix).
+	client, _ := newQbitMock(t, fixture6Downloads)
+	resolver := mustResolver(t, "anime=/data/anime,movies=/data/movies")
+	out, terr := callSearchDownloadsWithResolver(t, client, resolver, SearchDownloadsInput{
+		IncludeFields: []string{"save_path"},
+	})
+	if terr != nil {
+		t.Fatalf("err = %+v", terr)
+	}
+	got := map[string]string{}
+	for _, d := range out.Downloads {
+		got[d.Hash] = d.SavePath
+	}
+	for hash, want := range map[string]string{"aaa": "anime", "bbb": "anime", "ccc": "movies"} {
+		if got[hash] != want {
+			t.Errorf("download %s save_path = %q, want %q", hash, got[hash], want)
+		}
+	}
+}
+
+func TestSearchDownloads_SavePathFallsThroughToUnspecified(t *testing.T) {
+	// No resolver alias covers /data/anime. save_path must surface as
+	// the "unspecified:<...>" sentinel form so every output path
+	// parses as "<prefix>:<rest>" — there is no raw-absolute escape
+	// hatch on the wire.
+	client, _ := newQbitMock(t, fixture6Downloads)
+	out, _ := callSearchDownloads(t, client, SearchDownloadsInput{
+		IncludeFields: []string{"save_path"},
+	})
+	var aaa *Download
+	for i := range out.Downloads {
+		if out.Downloads[i].Hash == "aaa" {
+			aaa = &out.Downloads[i]
+			break
+		}
+	}
+	if aaa == nil {
+		t.Fatal("download aaa not found in fixture output")
+	}
+	if aaa.SavePath != "unspecified:data/anime" {
+		t.Errorf("save_path = %q, want 'unspecified:data/anime'", aaa.SavePath)
+	}
+}
+
+func TestSearchDownloads_ContentPathPrefixedToAliasWithRelpath(t *testing.T) {
+	// fixture1Download has content_path=/data/anime/show.mkv. With an
+	// "anime" alias rooted at /data/anime, content_path should resolve
+	// to "anime:show.mkv".
+	client, _ := newQbitMockRoutes(t, map[string]mockRoute{
+		"/api/v2/torrents/info": {body: fixture1Download},
+	})
+	resolver := mustResolver(t, "anime=/data/anime")
+	out, terr := callSearchDownloadsWithResolver(t, client, resolver, SearchDownloadsInput{
+		Hashes:        []string{"aaa"},
+		IncludeFields: []string{"content_path", "download_path"},
+	})
+	if terr != nil {
+		t.Fatalf("err = %+v", terr)
+	}
+	d := out.Downloads[0]
+	if d.ContentPath != "anime:show.mkv" {
+		t.Errorf("content_path = %q, want 'anime:show.mkv'", d.ContentPath)
+	}
+	// download_path=/data/incoming has no matching alias; falls
+	// through to the unspecified sentinel.
+	if d.DownloadPath != "unspecified:data/incoming" {
+		t.Errorf("download_path = %q, want 'unspecified:data/incoming'", d.DownloadPath)
+	}
+}
+
 func TestSearchDownloads_IncludeFieldsPopulatesOnlyRequested(t *testing.T) {
 	client, _ := newQbitMock(t, fixture6Downloads)
 	out, _ := callSearchDownloads(t, client, SearchDownloadsInput{
@@ -230,11 +313,13 @@ func TestSearchDownloads_IncludeAllExpandsToEveryFieldExceptTrackersAndFiles(t *
 		t.Fatalf("expected 1 download, got %d", len(out.Downloads))
 	}
 	d := out.Downloads[0]
-	if d.SavePath != "/data/anime" {
-		t.Errorf("SavePath = %q", d.SavePath)
+	// Empty resolver under this test: every path falls through to
+	// the unspecified-sentinel form.
+	if d.SavePath != "unspecified:data/anime" {
+		t.Errorf("SavePath = %q, want 'unspecified:data/anime'", d.SavePath)
 	}
-	if d.ContentPath != "/data/anime/show.mkv" {
-		t.Errorf("ContentPath = %q", d.ContentPath)
+	if d.ContentPath != "unspecified:data/anime/show.mkv" {
+		t.Errorf("ContentPath = %q, want 'unspecified:data/anime/show.mkv'", d.ContentPath)
 	}
 	if d.MagnetURI == "" {
 		t.Error("MagnetURI should be populated by 'all'")

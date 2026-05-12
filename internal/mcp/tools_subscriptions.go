@@ -109,7 +109,6 @@ type Subscription struct {
 	UseRegex       bool               `json:"use_regex"`
 	EpisodeFilter  string             `json:"episode_filter,omitempty"`
 	SmartFilter    bool               `json:"smart_filter"`
-	Destination    string             `json:"destination,omitempty"`
 	SavePath       string             `json:"save_path,omitempty"`
 	Tags           []string           `json:"tags"`
 	IgnoreDays     int                `json:"ignore_days"`
@@ -343,8 +342,7 @@ func projectSubscription(name string, rule qbt.RSSAutoDownloadRule, feed qbt.RSS
 		UseRegex:       rule.UseRegex,
 		EpisodeFilter:  rule.EpisodeFilter,
 		SmartFilter:    rule.SmartFilter,
-		SavePath:       savePath,
-		Destination:    resolver.NameForPath(savePath),
+		SavePath:       prefixed(resolver, savePath),
 		Tags:           tags,
 		IgnoreDays:     rule.IgnoreDays,
 		AddPaused:      addPaused,
@@ -446,7 +444,7 @@ type SubscribeInput struct {
 	UseRegex       *bool    `json:"use_regex,omitempty" jsonschema:"treat must_contain / must_not_contain as regex."`
 	EpisodeFilter  *string  `json:"episode_filter,omitempty" jsonschema:"qBittorrent episode-filter expression, e.g. '1x2;'."`
 	SmartFilter    *bool    `json:"smart_filter,omitempty" jsonschema:"qBittorrent's deduplicating smart filter."`
-	Destination    string   `json:"destination,omitempty" jsonschema:"save-destination alias name for matched downloads. Empty inherits qBittorrent's account default."`
+	Destination    string   `json:"destination,omitempty" jsonschema:"save-destination alias for matched downloads. Accepts '<alias>' for the alias root or '<alias>:<relpath>' to target a subdirectory (relpath must not start with '/' or contain '..'). Reserved name 'unspecified' rejected — output-only sentinel. Empty inherits qBittorrent's account default."`
 	Tags           []string `json:"tags" jsonschema:"tags applied to every download the rule auto-adds. Required on every call. Editing on replace re-tags future matches only; existing matches keep their original tags."`
 	IgnoreDays     *int     `json:"ignore_days,omitempty" jsonschema:"cool-down days between matches."`
 	AddPaused      *bool    `json:"add_paused,omitempty" jsonschema:"add matched downloads in paused state."`
