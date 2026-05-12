@@ -13,6 +13,19 @@ Design priorities:
 - **Namespaced tool names.** All tools carry the `qbit_` prefix so agents that connect multiple MCP servers don't see naming collisions on generic verbs (`add_download`, `list_tags`).
 - **Tool naming reflects behavior.** Read tools that filter and paginate are named `qbit_search_*`; read tools that return small fixed sets are `qbit_list_*`. Subscription mutations use agent vocabulary (`qbit_subscribe`/`qbit_unsubscribe`) rather than CRUD verbs.
 
+## Agent anti-patterns
+
+Things the surface is designed to make unnecessary; doing them anyway wastes tokens or risks correctness:
+
+- **Pre-checking with `qbit_search_downloads` before `qbit_add_download`.** The add is idempotent and reports `already_existed`. One call, not two.
+- **Pre-checking with `qbit_search_subscriptions` before `qbit_subscribe`.** Subscribe is upsert. Same one-call rule.
+- **Fabricating destination alias names.** The valid set lives in the tool description (`destHint`) and is also queryable via `qbit_list_destinations`. Unknown aliases return `invalid_argument` with the configured set listed.
+- **Editing `feed_url` on an existing subscription.** Rejected with `invalid_argument`. Unsubscribe and resubscribe instead.
+- **Calling `qbit_add_download` with magnet + assuming `name` is in the response.** Magnet metadata fetch is async in qbit; `name` resolves later. Follow up with `qbit_search_downloads` filtered to the returned hash.
+- **Passing `hashes` and `filter` together to `qbit_remove_downloads`.** Rejected. Pick one.
+- **Asking for `trackers` or `files` on a multi-hash `qbit_search_downloads`.** Rejected (N+1 fan-out). Use single-hash selection.
+- **Retrying after `upstream_forbidden`.** That's the loopback-auth-bypass check failing; retry won't fix it. Surface the operator-action message to the user.
+
 ## Operating model
 
 qbit-mcp is designed as a **sidecar in a trusted environment**: one agent, loopback-only access to one qBittorrent instance, operator-controlled deploy. This shapes a few deliberate choices the agent should be aware of:
@@ -25,7 +38,7 @@ qbit-mcp is designed as a **sidecar in a trusted environment**: one agent, loopb
 
 ### Destinations (save-path aliases)
 
-Tools that direct download storage (`qbit_add_download`, `qbit_subscribe`) **do not accept arbitrary filesystem paths**. Callers pass the *name* of a deploy-time-configured alias via a `destination` (or `set_destination`) field; the server resolves the name to a path before calling qBittorrent. Untrusted agents cannot redirect download storage outside the configured set.
+Tools that direct download storage (`qbit_add_download`, `qbit_subscribe`) **do not accept arbitrary filesystem paths**. Callers pass the *name* of a deploy-time-configured alias via a `destination` field; the server resolves the name to a path before calling qBittorrent. Untrusted agents cannot redirect download storage outside the configured set.
 
 The operator declares aliases at boot time via `--save-paths` / `QBITTORRENT_SAVE_PATHS`:
 
@@ -60,12 +73,12 @@ count=N
 
 Severity differentiates ops so log aggregators filtering on level can surface the destructive ones:
 
-| Action | Level | Why |
-|---|---|---|
-| `add` | `INFO` | Reversible by `qbit_remove_downloads`. Carries `already_existed=true|false` so the idempotent re-add (skipped upstream call) is distinguishable from a fresh add. |
-| `remove` | `WARN` | Even without on-disk deletion, "qbit forgot this download" is the kind of event operators investigate when something downstream breaks. |
-| `subscribe` | `INFO` | Upsert; reversible by `qbit_unsubscribe`. Extras: `feed_url`, `destination`, `tags`. |
-| `unsubscribe` | `WARN` | Removes a rule (and possibly an orphan feed). Extras: `feed_path`. |
+| Action | Level | Extras | Why |
+|---|---|---|---|
+| `add` | `INFO` | `destination`, `tags`, `already_existed` | Reversible by `qbit_remove_downloads`. `already_existed=true|false` distinguishes the idempotent re-add (skipped upstream call) from a fresh add. |
+| `remove` | `WARN` | _(none)_ | Even without on-disk deletion, "qbit forgot this download" is the kind of event operators investigate when something downstream breaks. |
+| `subscribe` | `INFO` | `feed_url`, `destination`, `tags` | Upsert; reversible by `qbit_unsubscribe`. |
+| `unsubscribe` | `WARN` | `feed_path` | Removes a rule (and possibly an orphan feed). |
 
 Operators investigating "what did the agent do" can `grep audit=true` on the structured JSON stderr stream. The `hashes` field carries the full hash list so per-hash forensics work too.
 
@@ -90,6 +103,17 @@ Use case: dmhy-mcp tags downloads it adds with `tvdb:<series-id>`. `qbit_search_
 Mutation fields (`tags` on `qbit_add_download`) are **literal tag names**, not patterns — qBittorrent's API requires exact strings.
 
 Malformed patterns return `invalid_argument` naming the offending entry.
+
+### Cross-server integration with dmhy-mcp
+
+`qbit_subscribe.feed_url` is designed to be piped verbatim from [`dmhy-mcp`](https://github.com/wyvernzora/dmhy-mcp)'s `search_releases` and `get_recent` tools. Both return a `feed_url` field carrying the DMHY RSS URL that bakes the resolved query into a subscribable feed. The end-to-end agent flow is:
+
+1. `dmhy_search_releases(keyword="<series>")` → reads `output.feed_url` + scans `output.results` to confirm the right series.
+2. `qbit_subscribe(name="<...>", feed_url=output.feed_url, destination="<alias>", tags=["tvdb:<id>"])` → atomic feed + rule creation.
+
+The agent never edits the URL — that's the point. qbit-mcp's URL-hash dedupe guarantees two subscriptions sharing the same `feed_url` share the underlying qBittorrent feed transparently, even if the agent re-asks `dmhy_search_releases` later with the same keyword and pipes the URL through again.
+
+For one-shot grabs (one specific episode) the agent goes through `dmhy_get_magnets(info_hashes=[...])` → `qbit_add_download(magnet=...)` instead, and qbit-mcp's idempotent re-add covers retry safety on that path too.
 
 ### Hash format
 
@@ -153,6 +177,8 @@ Primary read. Filtered, sorted, paginated.
   "include_fields": ["save_path"]          // see opt-in fields below
 }
 ```
+
+`states` accepts the eight normalized values listed above, **case-insensitively** — `"Downloading"`, `"DOWNLOADING"`, and `"downloading"` all pass. Unknown states return `invalid_argument`.
 
 `sort` enum: `name_asc`, `name_desc`, `added_on_asc`, `added_on_desc` (default), `size_asc`, `size_desc`, `progress_asc`, `progress_desc`, `dlspeed_desc`, `eta_asc`, `ratio_desc`.
 
@@ -327,11 +353,24 @@ Changing `feed_url` on an existing subscription via `qbit_subscribe` is rejected
 
 ### Tags
 
-`tags` is required on every `qbit_subscribe` call. Editing tags on replace re-tags **future** auto-added downloads only; matches already in qBittorrent keep their original tags. Retroactive retag of existing downloads is out of scope (would require an `update_downloads` tool, currently deferred). If you need to retag historical matches, `qbit_search_downloads` + manual qBittorrent action handles it.
+`tags` is required on every `qbit_subscribe` call.
+
+**Why required**: tags are how an agent correlates a download back to the subscription that spawned it. The intended workflow is that every subscription writes a stable identifier tag (e.g. `tvdb:<series-id>`) onto each auto-added download, then `qbit_search_downloads` filters by that tag (`tags: ["tvdb:12345"]`) to find everything that originated from one subscription. A tagless subscription leaves matched downloads anonymous from the agent's perspective — searchable by feed contents but not by which rule placed them.
+
+For the rare legitimate case (the subscription owns its destination exclusively and per-series correlation is not needed), pass `tags: []` explicitly. The schema rejects omitting the field entirely so the empty-tag choice is always deliberate, never accidental.
+
+Editing tags on replace re-tags **future** auto-added downloads only; matches already in qBittorrent keep their original tags. Retroactive retag of existing downloads is out of scope (would require an `update_downloads` tool, currently deferred). If you need to retag historical matches, `qbit_search_downloads` + manual qBittorrent action handles it.
 
 ### Upstream cost
 
-`qbit_search_subscriptions` always issues two upstream calls regardless of `include_recent_items` — one for rules, one for the feed tree (path → URL lookup). The `include_recent_items` flag toggles `withData=true` on the items call so qBittorrent inlines the article arrays; when false, the items call still happens but returns lightweight metadata only.
+`qbit_search_subscriptions` always issues exactly **two** upstream calls to qBittorrent, regardless of `include_recent_items`:
+
+1. `GET /api/v2/rss/rules` — fetches the rule set.
+2. `GET /api/v2/rss/items?withData=<flag>` — fetches the feed tree (needed for the path → URL reverse-lookup).
+
+The `include_recent_items` flag flips `withData=true` vs `withData=false` on call 2. With `withData=true`, qBittorrent inlines the article arrays in the response (larger payload). With `withData=false`, articles are omitted but the feed tree itself still returns (smaller payload). No third upstream call ever happens.
+
+The flag controls **response payload size**, not upstream call count.
 
 ### `qbit_search_subscriptions`
 
@@ -388,7 +427,13 @@ Search subscriptions with optional filtering and pagination. Each row carries en
 }
 ```
 
-`save_path` is qBittorrent's raw path (truth on the way out). `destination` is the reverse-resolved alias name when one matches; empty when the raw `save_path` does not correspond to a configured alias. `last_match_date` passes through qBittorrent's native format (typically ISO 8601, version-dependent) — empty when the rule has never matched. `recent_items` is omitted entirely when `include_recent_items: false`; `link` prefers the magnet/torrent URL over the article's HTML link.
+`save_path` is qBittorrent's raw path (truth on the way out). `destination` is the reverse-resolved alias name when one matches; empty when the raw `save_path` does not correspond to a configured alias. `last_match_date` passes through qBittorrent's native format (typically ISO 8601, version-dependent) — empty when the rule has never matched.
+
+`feed_has_error` is a plain boolean. qBittorrent's RSS API does not expose a companion error-message string on the `/api/v2/rss/items` response, so the **reason** for a feed error cannot be surfaced through this tool. When `feed_has_error: true`, check the qBittorrent WebUI directly to diagnose (broken URL, upstream DNS, malformed XML, etc.).
+
+`recent_items` is the **raw feed window** — the most-recent N articles emitted by the upstream RSS feed, optionally filtered by `since`. **It is not rule-filtered**: items here may or may not have passed `must_contain` / `must_not_contain` / `episode_filter`. Agents that need a "did the rule match this episode?" answer must re-evaluate the rule criteria locally over `recent_items`. A first-class `matched_items` projection would require a per-rule `/api/v2/rss/matchingArticles` upstream call (N+1 fan-out across subscriptions) and is parked under Deferred → `match_rss_articles`.
+
+`recent_items` is omitted entirely when `include_recent_items: false`; `link` prefers the magnet/torrent URL over the article's HTML link.
 
 ### `qbit_subscribe`
 
@@ -401,8 +446,10 @@ Atomic upsert. Creates (or replaces) the feed at the synthetic path and the rule
   "name": "kura-show-12345",
   "feed_url": "https://dmhy.example/rss?id=12345",
   "must_contain": "1080p",
+  "must_not_contain": "VOSTFR|RAW",
   "use_regex": false,
-  "episode_filter": "1x2;",
+  "episode_filter": "1x3;",
+  "smart_filter": false,
   "destination": "kura-inbox",
   "tags": ["tvdb:12345", "weekly"],
   "ignore_days": 0,
@@ -412,6 +459,16 @@ Atomic upsert. Creates (or replaces) the feed at the synthetic path and the rule
 ```
 
 `name` is the unique key (doubles as the qBittorrent rule name). `feed_url` is required and immutable for the lifetime of the subscription — passing a different value on replace returns `invalid_argument` (unsubscribe and resubscribe instead). `tags` is required on every call; passing a different array on replace re-tags future matches only and leaves existing matches untouched. Other rule fields are optional pointers: omitted fields keep their defaults on create / current values on replace.
+
+Filter fields (all pass through to qBittorrent's auto-download rule):
+
+- `must_contain` — substring (or regex when `use_regex: true`) that the feed-item title must match.
+- `must_not_contain` — substring (or regex) that excludes a feed item. Applied after `must_contain`.
+- `use_regex` — treat both `must_contain` and `must_not_contain` as Perl-style regex.
+- `episode_filter` — qBittorrent's episode-filter syntax. `1x3;` matches season 1, episode 3 onward. `1x3-5;` is a closed range (E3, E4, E5). Multiple expressions semicolon-separated: `1x3-5;2x1-;`. Omit (or empty string) for no episode constraint.
+- `smart_filter` — qBittorrent's deduplicating filter. When `true`, suppresses re-matches of an episode already added by this rule (handles common cases like a re-encode appearing days later). Off by default.
+- `ignore_days` — cool-down in days between matches against the same feed item. `0` disables.
+- `add_paused` — when `true`, matched downloads start paused. Useful for review-before-download workflows; otherwise leave `false`.
 
 **Output:** `{ "ok": true }`.
 
@@ -435,7 +492,7 @@ Removes the rule. The synthetic feed is removed too unless another subscription 
 - Retroactive retag of existing matched downloads — requires an `update_downloads` tool (also deferred). Forward-only retag on the rule itself is already supported via `qbit_subscribe`.
 - `match_rss_articles` — preview which feed items a rule matches. Useful for rule debugging; agents rarely need it.
 - `set_rss_settings` — global auto-download / processing toggles. Owner sets these in the qBittorrent UI.
-- Raw RSS folder-tree management — qbit-mcp synthesizes feed paths under `qbit-mcp/<hash>`. Other folders in qbit's RSS tree are left untouched but not navigable through this surface.
+- Raw RSS folder-tree management — qbit-mcp synthesizes feed paths under `qbit-mcp-<hash>` (flat names, no folder). Other folders in qbit's RSS tree are left untouched but not navigable through this surface.
 - `set_torrent_speed_limits`, `set_torrent_share_limit` — agent-uncommon power-user knobs.
 - `recheck`, `reannounce`, `set_force_start`, `set_super_seeding` — download-level toggles that complicate the v1 surface without a clear workflow story.
 - Download file upload (raw bytes) — magnet URIs cover the agentic flow we ship dmhy-mcp + qbit-mcp for.
