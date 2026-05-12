@@ -103,6 +103,25 @@ func (r *Resolver) Resolve(name string) (string, error) {
 // are valid.
 func (r *Resolver) Names() []string { return r.names }
 
+// NameForPath reverse-resolves a filesystem path to the alias name that
+// maps to it, returning "" when no alias matches. Used by output
+// projections that surface qBittorrent's raw save_path but also want to
+// echo back the deploy-time alias name when one applies.
+//
+// Returns the alphabetically-first match when two aliases share a path
+// (a misconfiguration the operator would normally not create).
+func (r *Resolver) NameForPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	for _, name := range r.names {
+		if r.aliases[name] == path {
+			return name
+		}
+	}
+	return ""
+}
+
 // DescriptionHint formats the configured aliases for inclusion in an MCP
 // tool description.
 func (r *Resolver) DescriptionHint() string {

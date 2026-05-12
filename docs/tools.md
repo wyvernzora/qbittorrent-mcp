@@ -297,17 +297,17 @@ Returns an empty array when no aliases are configured. Names are sorted alphabet
 
 A subscription bundles an RSS feed and the auto-download rule that filters its items into actual downloads. qBittorrent's native model has two separate layers (feeds, rules); qbit-mcp fuses them so agents work with one concept: "watch this URL, add matches to this destination with these tags."
 
-qBittorrent's RSS endpoints (`/api/v2/rss/*`) are not implemented by `github.com/autobrr/go-qbittorrent` as of v1.15.0. qbit-mcp reaches them via `client.GetHTTPClient()` and the configured `--qb-url`. The wrapper lives under `internal/qbtrss/` and is the only place in qbit-mcp that talks to qBittorrent without going through the SDK. Tracking issue: TODO file upstream.
+Handlers call qBittorrent's `/api/v2/rss/*` endpoints through `github.com/autobrr/go-qbittorrent` v1.15.0, which surfaces the full RSS API (feeds, rules, items, matching articles).
 
 ### Feed identity
 
 `feed_url` is the only feed-side input on `set_subscription`. qbit-mcp derives the synthetic qBittorrent feed path as:
 
 ```
-qbit-mcp/<first-16-hex-chars-of-sha256(feed_url)>
+qbit-mcp-<first-16-hex-chars-of-sha256(feed_url)>
 ```
 
-Subscriptions that share the same `feed_url` therefore collide on the same feed path — qBittorrent stores the feed once and both rules reference it. Delete-subscription only removes the underlying feed when no other subscription still references it. Agents never see or manage qbit's RSS folder tree directly.
+Subscriptions that share the same `feed_url` therefore collide on the same feed path — qBittorrent stores the feed once and both rules reference it. Delete-subscription only removes the underlying feed when no other subscription still references it. The path is a single-token flat name (no folder), which sidesteps qBittorrent's RSS folder-separator quirk (backslash). Agents never see or manage qbit's RSS folder tree directly.
 
 `feed_url` is the literal dedupe key — `https://x.com/feed` and `https://x.com/feed/` hash differently. qbit-mcp does **not** normalize URLs (trailing slashes, query-param order, case in the path) because query-bearing feeds (dmhy and similar) are sensitive to exact form. Callers are responsible for using a consistent URL across subscriptions they intend to dedupe.
 
@@ -319,11 +319,11 @@ Changing `feed_url` on an existing subscription via `set_subscription` is reject
 
 ### Upstream cost
 
-`list_subscriptions` always pulls feed contents from qBittorrent regardless of `include_recent_items`, because `last_match_date` and `match_count` are computed from item metadata. The `include_recent_items` flag controls **response payload** size to the caller, not the upstream call cost.
+`list_subscriptions` always issues two upstream calls regardless of `include_recent_items` — one for rules, one for the feed tree (path → URL lookup). The `include_recent_items` flag toggles `withData=true` on the items call so qBittorrent inlines the article arrays; when false, the items call still happens but returns lightweight metadata only.
 
 ### `list_subscriptions`
 
-Read all subscriptions. Each row carries enough state to identify the subscription, its filter, and its recent activity. Items are summary-only (last_match_date + match_count) by default; set `include_recent_items=true` to embed the most-recent items.
+Read all subscriptions. Each row carries enough state to identify the subscription, its filter, and the rule's last-match timestamp. Items are summary-only by default; set `include_recent_items=true` to embed the most-recent items.
 
 **Input:**
 
@@ -358,13 +358,11 @@ Read all subscriptions. Each row carries enough state to identify the subscripti
       "add_paused": false,
       "feed_has_error": false,
       "last_match_date": "2026-05-10T18:24:00Z",
-      "match_count": 7,
       "recent_items": [
         {
           "title": "[Erai-raws] Show - 03",
           "link": "magnet:?xt=urn:btih:...",
-          "pub_date": "2026-05-10T18:24:00Z",
-          "matching_rule": "kura-show-12345"
+          "pub_date": "2026-05-10T18:24:00Z"
         }
       ]
     }
@@ -372,7 +370,7 @@ Read all subscriptions. Each row carries enough state to identify the subscripti
 }
 ```
 
-`save_path` is qBittorrent's raw path (truth on the way out). `destination` is the reverse-resolved alias name when one matches; empty when the raw `save_path` does not correspond to a configured alias. `recent_items` is omitted entirely when `include_recent_items: false`.
+`save_path` is qBittorrent's raw path (truth on the way out). `destination` is the reverse-resolved alias name when one matches; empty when the raw `save_path` does not correspond to a configured alias. `last_match_date` passes through qBittorrent's native format (typically ISO 8601, version-dependent) — empty when the rule has never matched. `recent_items` is omitted entirely when `include_recent_items: false`; `link` prefers the magnet/torrent URL over the article's HTML link.
 
 ### `set_subscription`
 

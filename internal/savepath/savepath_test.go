@@ -137,6 +137,27 @@ func TestDescriptionHint_Empty(t *testing.T) {
 	}
 }
 
+func TestNameForPath_MatchesAlias(t *testing.T) {
+	r, _ := Parse("kura-inbox=/mnt/kura,downloads=/mnt/downloads")
+	if got := r.NameForPath("/mnt/kura"); got != "kura-inbox" {
+		t.Errorf("NameForPath(/mnt/kura) = %q, want kura-inbox", got)
+	}
+}
+
+func TestNameForPath_NoMatchReturnsEmpty(t *testing.T) {
+	r, _ := Parse("kura-inbox=/mnt/kura")
+	if got := r.NameForPath("/some/other/path"); got != "" {
+		t.Errorf("NameForPath unmatched = %q, want empty", got)
+	}
+}
+
+func TestNameForPath_EmptyInputReturnsEmpty(t *testing.T) {
+	r, _ := Parse("kura-inbox=/mnt/kura")
+	if got := r.NameForPath(""); got != "" {
+		t.Errorf("NameForPath(\"\") = %q, want empty", got)
+	}
+}
+
 func TestDescriptionHint_PopulatedListsNames(t *testing.T) {
 	r, _ := Parse("downloads=/mnt/downloads,kura-inbox=/mnt/kura")
 	got := r.DescriptionHint()
