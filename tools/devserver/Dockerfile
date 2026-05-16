@@ -3,7 +3,7 @@
 #
 # Build: make devserver-build
 # Run:   make devserver-run
-FROM golang:1.26.2-alpine
+FROM golang:1.26.3-alpine
 
 # tini reaps air + inspector subprocesses cleanly when docker stops the
 # container; -g (set on ENTRYPOINT) forwards signals to the whole process
